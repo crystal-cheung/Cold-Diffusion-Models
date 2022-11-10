@@ -1,6 +1,5 @@
-#from comet_ml import Experiment
-from denoising-diffusion-pytorch.denoising_diffusion_pytorch.denoise_diffusion_IQA import DBCNN,SC
-from demixing_noise_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
+from comet_ml import Experiment
+from deblurring_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
 import torchvision
 import os
 import errno
@@ -22,33 +21,36 @@ def del_folder(path):
         pass
 
 
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--time_steps', default=50, type=int,
-                    help="The number of steps the scheduler takes to go from clean image to an isotropic gaussian. This is also the number of steps of diffusion.")
+                    help="This is the number of steps in which a clean image looses information.")
 parser.add_argument('--train_steps', default=700000, type=int,
                     help='The number of iterations for training.')
+parser.add_argument('--blur_std', default=0.1, type=float,
+                    help='It sets the standard deviation for blur routines which have different meaning based on blur routine.')
+parser.add_argument('--blur_size', default=3, type=int,
+                    help='It sets the size of gaussian blur used in blur routines for each step t')
 parser.add_argument('--save_folder', default='./results_cifar10', type=str)
-parser.add_argument('--data_path', default='../deblurring-diffusion-pytorch/AFHQ/afhq/train/', type=str)
+parser.add_argument('--data_path', default='./AFHQ/afhq/train/', type=str)
 parser.add_argument('--load_path', default=None, type=str)
+parser.add_argument('--blur_routine', default='Incremental', type=str,
+                    help='This will set the type of blur routine one can use, check the code for what each one of them does in detail')
 parser.add_argument('--train_routine', default='Final', type=str)
 parser.add_argument('--sampling_routine', default='default', type=str,
-                    help='The choice of sampling routine for reversing the diffusion process.')
+                    help='The choice of sampling routine for reversing the diffusion process, when set as default it corresponds to Alg. 1 while when set as x0_step_down it stands for Alg. 2')
 parser.add_argument('--remove_time_embed', action="store_true")
 parser.add_argument('--residual', action="store_true")
 parser.add_argument('--loss_type', default='l1', type=str)
-parser.add_argument('--test_type', default='train_data', type=str)
+parser.add_argument('--discrete', action="store_true")
 
 
 args = parser.parse_args()
 print(args)
 
-img_path=None
-if 'train' in args.test_type:
-    img_path = args.data_path
-elif 'test' in args.test_type:
-    img_path = args.data_path
 
-model = DBCNN(
+model = Unet(
     dim = 64,
     dim_mults = (1, 2, 4, 8),
     channels=3,
@@ -59,20 +61,24 @@ model = DBCNN(
 diffusion = GaussianDiffusion(
     model,
     image_size = 128,
-    channels = 3, #
+    device_of_kernel = 'cuda',
+    channels = 3,
     timesteps = args.time_steps,   # number of steps
     loss_type = args.loss_type,    # L1 or L2
-    train_routine = args.train_routine, # Final or All
-    sampling_routine = args.sampling_routine # default or annealed
+    kernel_std=args.blur_std,
+    kernel_size=args.blur_size,
+    blur_routine=args.blur_routine,
+    train_routine = args.train_routine,
+    sampling_routine = args.sampling_routine,
+    discrete=args.discrete
 ).cuda()
 
 import torch
 diffusion = torch.nn.DataParallel(diffusion, device_ids=range(torch.cuda.device_count()))
 
-
 trainer = Trainer(
     diffusion,
-    img_path,
+    args.data_path,
     image_size = 128,
     train_batch_size = 32,
     train_lr = 2e-5,
@@ -82,20 +88,7 @@ trainer = Trainer(
     fp16 = False,                       # turn on mixed precision training with apex
     results_folder = args.save_folder,
     load_path = args.load_path,
-    dataset = 'train'
+    dataset = 'AFHQ'
 )
 
-if args.test_type == 'train_data':
-    trainer.test_from_data('train', s_times=args.sample_steps)
-
-elif args.test_type == 'test_data':
-    trainer.test_from_data('test', s_times=args.sample_steps)
-
-#### for FID and noise ablation ##
-elif args.test_type == 'test_sample_and_save_for_fid':
-    trainer.sample_and_save_for_fid()
-
-########## for paper ##########
-
-elif args.test_type == 'train_paper_showing_diffusion_images_cover_page':
-    trainer.paper_showing_diffusion_images_cover_page()
+trainer.train()

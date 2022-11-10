@@ -56,10 +56,11 @@ def num_to_groups(num, divisor):
     return arr
 
 def loss_backwards(fp16, loss, optimizer, **kwargs):
-    if fp16:
+    if fp16: 
         with amp.scale_loss(loss, optimizer) as scaled_loss:
             scaled_loss.backward(**kwargs)
     else:
+        # what does **kwargs do?
         loss.backward(**kwargs)
 
 # small helper modules
@@ -307,7 +308,7 @@ def cosine_beta_schedule(timesteps, s = 0.008):
 import torch
 import torchvision
 
-class GaussianDifusion(nn.Module):
+class GaussianDiffusion(nn.Module):
     def __init__(
         self,
         denoise_fn,
@@ -347,8 +348,6 @@ class GaussianDifusion(nn.Module):
             t = self.num_timesteps
 
         xt = img
-        
-         
         direct_recons = None
 
         while (t):
@@ -383,52 +382,71 @@ class GaussianDifusion(nn.Module):
         )
 
     @torch.no_grad()
-    def gen_sample(self, batch_size=16, img=None, noise_level=0, t=None):
+    def gen_sample(self, batch_size=16, img=None, t=None):
         self.denoise_fn.eval()
         if t == None:
             t = self.num_timesteps
 
         noise = img
         direct_recons = None
-        img = img + torch.randn_like(img) * noise_level
 
-        while (t):
-            step = torch.full((batch_size,), t - 1, dtype=torch.long, device=img.device)
-            x1_bar = self.denoise_fn(img, step)
-            x2_bar = noise
-            if direct_recons == None:
-                direct_recons = x1_bar
+        if self.sampling_routine == 'ddim':
+            while (t):
+                step = torch.full((batch_size,), t - 1, dtype=torch.long, device=img.device)
+                x1_bar = self.denoise_fn(img, step)
+                x2_bar = self.get_x2_bar_from_xt(x1_bar, img, step)
+                if direct_recons == None:
+                    direct_recons = x1_bar
 
-            xt_bar = x1_bar
-            if t != 0:
-                xt_bar = self.q_sample(x_start=xt_bar, x_end=x2_bar, t=step)
+                xt_bar = x1_bar
+                if t != 0:
+                    xt_bar = self.q_sample(x_start=xt_bar, x_end=x2_bar, t=step)
 
-            xt_sub1_bar = x1_bar
-            if t - 1 != 0:
-                step2 = torch.full((batch_size,), t - 2, dtype=torch.long, device=img.device)
-                xt_sub1_bar = self.q_sample(x_start=xt_sub1_bar, x_end=x2_bar, t=step2)
+                xt_sub1_bar = x1_bar
+                if t - 1 != 0:
+                    step2 = torch.full((batch_size,), t - 2, dtype=torch.long, device=img.device)
+                    xt_sub1_bar = self.q_sample(x_start=xt_sub1_bar, x_end=x2_bar, t=step2)
 
-            x = img - xt_bar + xt_sub1_bar
-            img = x
-            t = t - 1
+                x = img - xt_bar + xt_sub1_bar
+                img = x
+                t = t - 1
+
+        elif self.sampling_routine == 'x0_step_down':
+            while (t):
+                step = torch.full((batch_size,), t - 1, dtype=torch.long, device=img.device)
+                x1_bar = self.denoise_fn(img, step)
+                x2_bar = noise
+                if direct_recons == None:
+                    direct_recons = x1_bar
+
+                xt_bar = x1_bar
+                if t != 0:
+                    xt_bar = self.q_sample(x_start=xt_bar, x_end=x2_bar, t=step)
+
+                xt_sub1_bar = x1_bar
+                if t - 1 != 0:
+                    step2 = torch.full((batch_size,), t - 2, dtype=torch.long, device=img.device)
+                    xt_sub1_bar = self.q_sample(x_start=xt_sub1_bar, x_end=x2_bar, t=step2)
+
+                x = img - xt_bar + xt_sub1_bar
+                img = x
+                t = t - 1
 
         return noise, direct_recons, img
 
+
     @torch.no_grad()
-    def forward_and_backward(self, batch_size=16, img1=None, img2=None, t=None, times=None, eval=True):
+    def forward_and_backward(self, batch_size=16, img=None, t=None, times=None, eval=True):
 
         self.denoise_fn.eval()
 
         if t == None:
             t = self.num_timesteps
 
-
-        img = img1
-
         Forward = []
         Forward.append(img)
 
-        noise = img2
+        noise = torch.randn_like(img)
 
         for i in range(t):
             with torch.no_grad():
@@ -459,6 +477,7 @@ class GaussianDifusion(nn.Module):
             t = t - 1
 
         return Forward, Backward, img
+
 
     @torch.no_grad()
     def all_sample(self, batch_size=16, img=None, t=None, times=None, eval=True):
@@ -494,7 +513,7 @@ class GaussianDifusion(nn.Module):
             img = x
             t = t - 1
 
-        return X1_0s, X_ts
+        return X1_0s, X2_0s, X_ts
 
     def q_sample(self, x_start, x_end, t):
         # simply use the alphas to interpolate
@@ -504,7 +523,6 @@ class GaussianDifusion(nn.Module):
         )
 
     def p_losses(self, x_start, x_end, t):
-        # p
         b, c, h, w = x_start.shape
         if self.train_routine == 'Final':
             x_mix = self.q_sample(x_start=x_start, x_end=x_end, t=t)
@@ -604,8 +622,7 @@ class Trainer(object):
     def __init__(
         self,
         diffusion_model,
-        folder1,
-        folder2,
+        folder,
         *,
         ema_decay = 0.995,
         image_size = 128,
@@ -633,20 +650,17 @@ class Trainer(object):
 
         self.batch_size = train_batch_size
         self.image_size = image_size
-        self.gradient_accumulate_every = gradient_accumulate_every
+        self.gradient_accumulate_every = gradient_accumulate_every #
         self.train_num_steps = train_num_steps
 
         if dataset == 'train':
             print(dataset, "DA used")
-            self.ds1 = Dataset_Aug1(folder1, image_size)
-            self.ds2 = Dataset_Aug1(folder2, image_size)
+            self.ds = Dataset_Aug1(folder, image_size)
         else:
             print(dataset)
-            self.ds1 = Dataset(folder1, image_size)
-            self.ds2 = Dataset(folder2, image_size)
+            self.ds = Dataset(folder, image_size)
 
-        self.dl1 = cycle(data.DataLoader(self.ds1, batch_size = train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=16, drop_last=True)) 
-        self.dl2 = cycle(data.DataLoader(self.ds2, batch_size=train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=16, drop_last=True))
+        self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=16, drop_last=True))
 
         self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
         self.step = 0
@@ -714,20 +728,19 @@ class Trainer(object):
 
 
 
-    def  train(self):
-        experiment = Experiment(api_key="57ArytWuo2X4cdDmgU1jxin77",
-                                project_name="Cold_Diffusion_Cycle")
+    def train(self):
 
         backwards = partial(loss_backwards, self.fp16)
-
+    # with amp.scale_loss(loss, optimizer) as scaled_loss:
         acc_loss = 0
-        
         while self.step < self.train_num_steps:
             u_loss = 0
             for i in range(self.gradient_accumulate_every):
-                data_1 = next(self.dl1).cuda()
-                data_2 = next(self.dl2).cuda() 
-                loss = torch.mean(self.model(data_1, data_2))
+                data_1 = next(self.dl)
+                data_2 = torch.randn_like(data_1)
+
+                data_1, data_2 = data_1.cuda(), data_2.cuda()
+                loss  = torch.mean(self.model(data_1, data_2))
                 if self.step % 100 == 0:
                     print(f'{self.step}: {loss.item()}')
                 u_loss += loss.item()
@@ -740,12 +753,14 @@ class Trainer(object):
 
             if self.step % self.update_ema_every == 0:
                 self.step_ema()
-
+            
             if self.step != 0 and self.step % self.save_and_sample_every == 0:
-                experiment.log_current_epoch(self.step)
                 milestone = self.step // self.save_and_sample_every
                 batches = self.batch_size
-                og_img = next(self.dl2).cuda()
+
+                data_1 = next(self.dl)
+                data_2 = torch.randn_like(data_1)
+                og_img = data_2.cuda()
 
                 xt, direct_recons, all_images = self.ema_model.module.sample(batch_size=batches, img=og_img)
 
@@ -763,7 +778,6 @@ class Trainer(object):
                                  nrow=6)
 
                 acc_loss = acc_loss/(self.save_and_sample_every+1)
-                experiment.log_metric("Training Loss", acc_loss, step=self.step)
                 print(f'Mean of last {self.step}: {acc_loss}')
                 acc_loss=0
 
@@ -777,8 +791,7 @@ class Trainer(object):
 
     def test_from_data(self, extra_path, s_times=None):
         batches = self.batch_size
-        og_img = next(self.dl2).cuda()
-
+        og_img = next(self.dl).cuda()
         X_0s, X_ts = self.ema_model.module.all_sample(batch_size=batches, img=og_img, times=s_times)
 
         og_img = (og_img + 1) * 0.5
@@ -806,7 +819,6 @@ class Trainer(object):
         imageio.mimsave(str(self.results_folder / f'Gif-{extra_path}-x0.gif'), frames_0)
         imageio.mimsave(str(self.results_folder / f'Gif-{extra_path}-xt.gif'), frames_t)
 
-
     def sample_and_save_for_fid(self, noise=0):
 
         # xt_folder = f'{self.results_folder}_xt'
@@ -818,14 +830,17 @@ class Trainer(object):
         # direct_recons_folder = f'{self.results_folder}_dir_recons'
         # create_folder(direct_recons_folder)
 
+        # data_1 = next(self.dl)
+
         cnt = 0
-        bs = self.batch_size
-        for j in range(int(6400/self.batch_size)):
-            og_img = next(self.dl2).cuda()
+        bs = 128
+        for j in range(int(6400/bs)):
+
+            data_2 = torch.randn(bs, 3, 128, 128)
+            og_img = data_2.cuda()
             print(og_img.shape)
 
-            xt, direct_recons, all_images = self.ema_model.module.gen_sample(batch_size=bs, img=og_img,
-                                                                             noise_level=noise)
+            xt, direct_recons, all_images = self.ema_model.module.gen_sample(batch_size=bs, img=og_img)
 
             for i in range(all_images.shape[0]):
                 utils.save_image((all_images[i] + 1) * 0.5,
@@ -843,29 +858,25 @@ class Trainer(object):
 
         import cv2
         cnt = 0
-
-        #to_show = [2, 4, 8, 16, 32, 64, 128, 192]
+        # for 200 steps
+        # to_show = [2, 4, 8, 16, 32, 64, 128, 192]
         to_show = [2, 4, 16, 64, 128, 256, 384, 448, 480]
 
         for i in range(5):
             batches = self.batch_size
-            og_img_1 = next(self.dl1).cuda()
-            og_img_2 = next(self.dl2).cuda()
-            print(og_img_1.shape)
+            og_img = next(self.dl).cuda()
+            print(og_img.shape)
 
-            Forward, Backward, final_all = self.ema_model.module.forward_and_backward(batch_size=batches, img1=og_img_1, img2=og_img_2)
-
-            og_img_1 = (og_img_1 + 1) * 0.5
-            og_img_2 = (og_img_2 + 1) * 0.5
+            Forward, Backward, final_all = self.ema_model.module.forward_and_backward(batch_size=batches, img=og_img)
+            og_img = (og_img + 1) * 0.5
             final_all = (final_all + 1) * 0.5
 
 
 
             for k in range(Forward[0].shape[0]):
-                print(k)
                 l = []
 
-                utils.save_image(og_img_1[k], str(self.results_folder / f'og_img_{cnt}.png'), nrow=1)
+                utils.save_image(og_img[k], str(self.results_folder / f'og_img_{cnt}.png'), nrow=1)
                 start = cv2.imread(f'{self.results_folder}/og_img_{cnt}.png')
                 l.append(start)
 
@@ -896,12 +907,8 @@ class Trainer(object):
 
                 cnt+=1
 
-            del Forward
-            del Backward
-            del final_all
 
     def paper_invert_section_images(self, s_times=None):
-
         cnt = 0
         for i in range(50):
             batches = self.batch_size
@@ -948,7 +955,7 @@ class Trainer(object):
                 cnt += 1
 
     def paper_showing_diffusion_images(self, s_times=None):
-
+        #
         import cv2
         cnt = 0
         # to_show = [0, 1, 2, 4, 8, 10, 12, 16, 17, 18, 19, 20]
@@ -988,7 +995,7 @@ class Trainer(object):
 
 
     def paper_showing_diffusion_images_diff(self, s_times=None):
-
+        
         import cv2
         for i in range(50):
             batches = self.batch_size
@@ -1388,7 +1395,7 @@ class Trainer(object):
                 cnt += 1
 
     def fid_distance_decrease_from_manifold(self, fid_func, start=0, end=1000):
-
+    
         #from skimage.metrics import structural_similarity as ssim
         from pytorch_msssim import ssim
 

@@ -307,7 +307,7 @@ def cosine_beta_schedule(timesteps, s = 0.008):
 import torch
 import torchvision
 
-class GaussianDifusion(nn.Module):
+class GaussianDiffusion(nn.Module):
     def __init__(
         self,
         denoise_fn,
@@ -347,8 +347,6 @@ class GaussianDifusion(nn.Module):
             t = self.num_timesteps
 
         xt = img
-        
-         
         direct_recons = None
 
         while (t):
@@ -504,7 +502,6 @@ class GaussianDifusion(nn.Module):
         )
 
     def p_losses(self, x_start, x_end, t):
-        # p
         b, c, h, w = x_start.shape
         if self.train_routine == 'Final':
             x_mix = self.q_sample(x_start=x_start, x_end=x_end, t=t)
@@ -645,7 +642,7 @@ class Trainer(object):
             self.ds1 = Dataset(folder1, image_size)
             self.ds2 = Dataset(folder2, image_size)
 
-        self.dl1 = cycle(data.DataLoader(self.ds1, batch_size = train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=16, drop_last=True)) 
+        self.dl1 = cycle(data.DataLoader(self.ds1, batch_size = train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=16, drop_last=True))
         self.dl2 = cycle(data.DataLoader(self.ds2, batch_size=train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=16, drop_last=True))
 
         self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
@@ -714,19 +711,18 @@ class Trainer(object):
 
 
 
-    def  train(self):
+    def train(self):
         experiment = Experiment(api_key="57ArytWuo2X4cdDmgU1jxin77",
                                 project_name="Cold_Diffusion_Cycle")
 
         backwards = partial(loss_backwards, self.fp16)
 
         acc_loss = 0
-        
         while self.step < self.train_num_steps:
             u_loss = 0
             for i in range(self.gradient_accumulate_every):
                 data_1 = next(self.dl1).cuda()
-                data_2 = next(self.dl2).cuda() 
+                data_2 = next(self.dl2).cuda()
                 loss = torch.mean(self.model(data_1, data_2))
                 if self.step % 100 == 0:
                     print(f'{self.step}: {loss.item()}')

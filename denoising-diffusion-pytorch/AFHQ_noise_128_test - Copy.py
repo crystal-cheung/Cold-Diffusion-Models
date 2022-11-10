@@ -1,5 +1,4 @@
 #from comet_ml import Experiment
-from denoising-diffusion-pytorch.denoising_diffusion_pytorch.denoise_diffusion_IQA import DBCNN,SC
 from demixing_noise_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
 import torchvision
 import os
@@ -48,7 +47,7 @@ if 'train' in args.test_type:
 elif 'test' in args.test_type:
     img_path = args.data_path
 
-model = DBCNN(
+model = Unet(
     dim = 64,
     dim_mults = (1, 2, 4, 8),
     channels=3,
@@ -59,11 +58,11 @@ model = DBCNN(
 diffusion = GaussianDiffusion(
     model,
     image_size = 128,
-    channels = 3, #
+    channels = 3,
     timesteps = args.time_steps,   # number of steps
     loss_type = args.loss_type,    # L1 or L2
-    train_routine = args.train_routine, # Final or All
-    sampling_routine = args.sampling_routine # default or annealed
+    train_routine = args.train_routine,
+    sampling_routine = args.sampling_routine
 ).cuda()
 
 import torch

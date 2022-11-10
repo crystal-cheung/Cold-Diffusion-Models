@@ -284,8 +284,14 @@ class Unet(nn.Module):
 
 def extract(a, t, x_shape):
     b, *_ = t.shape
-    out = a.gather(-1, t)
-    return out.reshape(b, *((1,) * (len(x_shape) - 1)))
+    ret = None
+    for i in range(b):
+        if ret == None:
+            ret = a[t[i]: t[i] + 1]
+        else:
+            ret = torch.cat((ret, a[t[i]: t[i] + 1]), dim=0)
+
+    return ret
 
 def noise_like(shape, device, repeat=False):
     repeat_noise = lambda: torch.randn((1, *shape[1:]), device=device).repeat(shape[0], *((1,) * (len(shape) - 1)))
@@ -304,10 +310,41 @@ def cosine_beta_schedule(timesteps, s = 0.008):
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
     return torch.clip(betas, 0, 0.999)
 
+def get_fade_kernel(dims, std):
+    fade_kernel = tgm.image.get_gaussian_kernel2d(dims, std)
+    fade_kernel = fade_kernel / torch.max(fade_kernel)
+    fade_kernel = torch.ones_like(fade_kernel) - fade_kernel
+    fade_kernel = fade_kernel[1:, 1:]
+    return fade_kernel
+
+def get_kernels_with_schedule(timesteps, size, kernel_std, initial_mask):
+    faded_kernels = []
+    kers = torch.ones((1, size, size))
+
+    for i in range(timesteps):
+        kernel = get_fade_kernel((size + 1, size + 1), (kernel_std * (i + initial_mask), kernel_std * (i + initial_mask)))
+        kers = kers * kernel
+        faded_kernels.append(kers)
+    return torch.stack(faded_kernels)
+
+
+def get_reverse_kernels_with_schedule(timesteps, size, kernel_std, initial_mask):
+    faded_kernels = []
+    kers = torch.ones((1, size, size))
+
+    for i in range(timesteps):
+        faded_kernels.append(kers)
+        kernel = get_fade_kernel((size + 1, size + 1), (kernel_std * (i + initial_mask), kernel_std * (i + initial_mask)))
+        kers = kers * kernel
+
+    faded_kernels.reverse()
+    return torch.stack(faded_kernels)
+
+
 import torch
 import torchvision
 
-class GaussianDifusion(nn.Module):
+class GaussianDiffusion(nn.Module):
     def __init__(
         self,
         denoise_fn,
@@ -318,7 +355,9 @@ class GaussianDifusion(nn.Module):
         loss_type = 'l1',
         train_routine = 'Final',
         sampling_routine='default',
-        discrete=False
+        reverse = False,
+        kernel_std = 0.15,
+        initial_mask=11
     ):
         super().__init__()
         self.channels = channels
@@ -327,14 +366,18 @@ class GaussianDifusion(nn.Module):
 
         self.num_timesteps = int(timesteps)
         self.loss_type = loss_type
+        self.reverse = reverse
 
-        betas = cosine_beta_schedule(timesteps)
-        alphas = 1. - betas
-        alphas_cumprod = torch.cumprod(alphas, axis=0)
+        if self.reverse:
+            one_minus_alphas = get_reverse_kernels_with_schedule(timesteps, image_size, kernel_std, initial_mask)
+            alphas = 1. - one_minus_alphas
+        else:
+            alphas = get_kernels_with_schedule(timesteps, image_size, kernel_std, initial_mask)
+            one_minus_alphas = 1. - alphas
 
-        self.register_buffer('alphas_cumprod', alphas_cumprod)
-        self.register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
-        self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1. - alphas_cumprod))
+
+        self.register_buffer('alphas', alphas)
+        self.register_buffer('one_minus_alphas', one_minus_alphas)
 
         self.train_routine = train_routine
         self.sampling_routine = sampling_routine
@@ -346,15 +389,14 @@ class GaussianDifusion(nn.Module):
         if t == None:
             t = self.num_timesteps
 
+        orig = img
         xt = img
-        
-         
         direct_recons = None
 
         while (t):
             step = torch.full((batch_size,), t - 1, dtype=torch.long).cuda()
             x1_bar = self.denoise_fn(img, step)
-            x2_bar = self.get_x2_bar_from_xt(x1_bar, img, step)
+            x2_bar = orig #self.get_x2_bar_from_xt(x1_bar, img, step)
 
             if direct_recons is None:
                 direct_recons = x1_bar
@@ -378,8 +420,8 @@ class GaussianDifusion(nn.Module):
 
     def get_x2_bar_from_xt(self, x1_bar, xt, t):
         return (
-                (xt - extract(self.sqrt_alphas_cumprod, t, x1_bar.shape) * x1_bar) /
-                extract(self.sqrt_one_minus_alphas_cumprod, t, x1_bar.shape)
+                (xt - extract(self.alphas, t, x1_bar.shape) * x1_bar) /
+                (extract(self.one_minus_alphas, t, x1_bar.shape) + 0.00000000000001)
         )
 
     @torch.no_grad()
@@ -422,26 +464,26 @@ class GaussianDifusion(nn.Module):
         if t == None:
             t = self.num_timesteps
 
+        orig_1 = img1
+        orig_2 = img2
 
         img = img1
-
         Forward = []
         Forward.append(img)
-
         noise = img2
 
-        for i in range(t):
+        for i in range(self.num_timesteps):
             with torch.no_grad():
                 step = torch.full((batch_size,), i, dtype=torch.long, device=img.device)
                 n_img = self.q_sample(x_start=img, x_end=noise, t=step)
                 Forward.append(n_img)
 
         Backward = []
-        img = n_img
+        img = img2
         while (t):
-            step = torch.full((batch_size,), t - 1, dtype=torch.long, device=img.device)
+            step = torch.full((batch_size,), t - 1, dtype=torch.long).cuda()
             x1_bar = self.denoise_fn(img, step)
-            x2_bar = noise #self.get_x2_bar_from_xt(x1_bar, img, step)
+            x2_bar = orig_2  # self.get_x2_bar_from_xt(x1_bar, img, step)
 
             Backward.append(img)
 
@@ -451,7 +493,7 @@ class GaussianDifusion(nn.Module):
 
             xt_sub1_bar = x1_bar
             if t - 1 != 0:
-                step2 = torch.full((batch_size,), t - 2, dtype=torch.long, device=img.device)
+                step2 = torch.full((batch_size,), t - 2, dtype=torch.long).cuda()
                 xt_sub1_bar = self.q_sample(x_start=xt_sub1_bar, x_end=x2_bar, t=step2)
 
             x = img - xt_bar + xt_sub1_bar
@@ -459,6 +501,7 @@ class GaussianDifusion(nn.Module):
             t = t - 1
 
         return Forward, Backward, img
+
 
     @torch.no_grad()
     def all_sample(self, batch_size=16, img=None, t=None, times=None, eval=True):
@@ -469,17 +512,18 @@ class GaussianDifusion(nn.Module):
         if t == None:
             t = self.num_timesteps
 
-        X1_0s, X2_0s, X_ts = [], [], []
+        orig = img
+
+        X1_0s, X_ts = [], []
         while (t):
 
             step = torch.full((batch_size,), t - 1, dtype=torch.long).cuda()
             x1_bar = self.denoise_fn(img, step)
-            x2_bar = self.get_x2_bar_from_xt(x1_bar, img, step)
+            x2_bar = orig #self.get_x2_bar_from_xt(x1_bar, img, step)
 
 
-            X1_0s.append(x1_bar.detach().cpu())
-            X2_0s.append(x2_bar.detach().cpu())
-            X_ts.append(img.detach().cpu())
+            X1_0s.append(x1_bar)
+            X_ts.append(img)
 
             xt_bar = x1_bar
             if t != 0:
@@ -499,12 +543,11 @@ class GaussianDifusion(nn.Module):
     def q_sample(self, x_start, x_end, t):
         # simply use the alphas to interpolate
         return (
-                extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
-                extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * x_end
+                extract(self.alphas, t, x_start.shape) * x_start +
+                extract(self.one_minus_alphas, t, x_start.shape) * x_end
         )
 
     def p_losses(self, x_start, x_end, t):
-        # p
         b, c, h, w = x_start.shape
         if self.train_routine == 'Final':
             x_mix = self.q_sample(x_start=x_start, x_end=x_end, t=t)
@@ -604,8 +647,7 @@ class Trainer(object):
     def __init__(
         self,
         diffusion_model,
-        folder1,
-        folder2,
+        folder,
         *,
         ema_decay = 0.995,
         image_size = 128,
@@ -621,6 +663,7 @@ class Trainer(object):
         load_path = None,
         dataset = None,
         shuffle=True
+
     ):
         super().__init__()
         self.model = diffusion_model
@@ -638,15 +681,12 @@ class Trainer(object):
 
         if dataset == 'train':
             print(dataset, "DA used")
-            self.ds1 = Dataset_Aug1(folder1, image_size)
-            self.ds2 = Dataset_Aug1(folder2, image_size)
+            self.ds = Dataset_Aug1(folder, image_size)
         else:
             print(dataset)
-            self.ds1 = Dataset(folder1, image_size)
-            self.ds2 = Dataset(folder2, image_size)
+            self.ds = Dataset(folder, image_size)
 
-        self.dl1 = cycle(data.DataLoader(self.ds1, batch_size = train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=16, drop_last=True)) 
-        self.dl2 = cycle(data.DataLoader(self.ds2, batch_size=train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=16, drop_last=True))
+        self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=16, drop_last=True))
 
         self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
         self.step = 0
@@ -714,19 +754,25 @@ class Trainer(object):
 
 
 
-    def  train(self):
+    def train(self):
         experiment = Experiment(api_key="57ArytWuo2X4cdDmgU1jxin77",
                                 project_name="Cold_Diffusion_Cycle")
 
         backwards = partial(loss_backwards, self.fp16)
 
         acc_loss = 0
-        
         while self.step < self.train_num_steps:
             u_loss = 0
             for i in range(self.gradient_accumulate_every):
-                data_1 = next(self.dl1).cuda()
-                data_2 = next(self.dl2).cuda() 
+                data_1 = next(self.dl)
+
+                data_2 = torch.rand((self.batch_size, 3)) - 0.5
+                data_2 = data_2.unsqueeze(2)
+                data_2 = data_2.unsqueeze(3)
+
+                data_2 = data_2.expand(self.batch_size, 3, self.image_size, self.image_size)
+
+                data_1, data_2 = data_1.cuda(), data_2.cuda()
                 loss = torch.mean(self.model(data_1, data_2))
                 if self.step % 100 == 0:
                     print(f'{self.step}: {loss.item()}')
@@ -745,7 +791,13 @@ class Trainer(object):
                 experiment.log_current_epoch(self.step)
                 milestone = self.step // self.save_and_sample_every
                 batches = self.batch_size
-                og_img = next(self.dl2).cuda()
+
+                data_2 = torch.rand((self.batch_size, 3)) - 0.5
+                data_2 = data_2.unsqueeze(2)
+                data_2 = data_2.unsqueeze(3)
+
+                data_2 = data_2.expand(self.batch_size, 3, self.image_size, self.image_size)
+                og_img = data_2.cuda()
 
                 xt, direct_recons, all_images = self.ema_model.module.sample(batch_size=batches, img=og_img)
 
@@ -777,7 +829,14 @@ class Trainer(object):
 
     def test_from_data(self, extra_path, s_times=None):
         batches = self.batch_size
-        og_img = next(self.dl2).cuda()
+
+        data_2 = torch.rand((self.batch_size, 3)) - 0.5
+        data_2 = data_2.unsqueeze(2)
+        data_2 = data_2.unsqueeze(3)
+
+        data_2 = data_2.expand(self.batch_size, 3, self.image_size, self.image_size)
+        og_img = data_2.cuda()
+        og_img = og_img + 0.000001 * torch.randn_like(og_img)
 
         X_0s, X_ts = self.ema_model.module.all_sample(batch_size=batches, img=og_img, times=s_times)
 
@@ -806,7 +865,6 @@ class Trainer(object):
         imageio.mimsave(str(self.results_folder / f'Gif-{extra_path}-x0.gif'), frames_0)
         imageio.mimsave(str(self.results_folder / f'Gif-{extra_path}-xt.gif'), frames_t)
 
-
     def sample_and_save_for_fid(self, noise=0):
 
         # xt_folder = f'{self.results_folder}_xt'
@@ -821,7 +879,13 @@ class Trainer(object):
         cnt = 0
         bs = self.batch_size
         for j in range(int(6400/self.batch_size)):
-            og_img = next(self.dl2).cuda()
+            data_2 = torch.rand((self.batch_size, 3)) - 0.5
+            data_2 = data_2.unsqueeze(2)
+            data_2 = data_2.unsqueeze(3)
+
+            data_2 = data_2.expand(self.batch_size, 3, self.image_size, self.image_size)
+            og_img = data_2.cuda()
+
             print(og_img.shape)
 
             xt, direct_recons, all_images = self.ema_model.module.gen_sample(batch_size=bs, img=og_img,
@@ -844,13 +908,21 @@ class Trainer(object):
         import cv2
         cnt = 0
 
-        #to_show = [2, 4, 8, 16, 32, 64, 128, 192]
-        to_show = [2, 4, 16, 64, 128, 256, 384, 448, 480]
+        # to_show = [2, 4, 8, 16, 32, 64, 128, 192]
+        #to_show = [2, 4, 16, 64, 128, 256, 384, 448, 480]
+        to_show = [8, 192, 256, 320, 384, 512, 640, 704, 748]
 
         for i in range(5):
             batches = self.batch_size
-            og_img_1 = next(self.dl1).cuda()
-            og_img_2 = next(self.dl2).cuda()
+            og_img_1 = next(self.dl).cuda()
+
+            data_2 = torch.rand((self.batch_size, 3)) - 0.5
+            data_2 = data_2.unsqueeze(2)
+            data_2 = data_2.unsqueeze(3)
+
+            data_2 = data_2.expand(self.batch_size, 3, self.image_size, self.image_size)
+            og_img_2 = data_2.cuda()
+
             print(og_img_1.shape)
 
             Forward, Backward, final_all = self.ema_model.module.forward_and_backward(batch_size=batches, img1=og_img_1, img2=og_img_2)
@@ -858,8 +930,6 @@ class Trainer(object):
             og_img_1 = (og_img_1 + 1) * 0.5
             og_img_2 = (og_img_2 + 1) * 0.5
             final_all = (final_all + 1) * 0.5
-
-
 
             for k in range(Forward[0].shape[0]):
                 print(k)
@@ -885,20 +955,14 @@ class Trainer(object):
                     if (len(Backward) - j) in to_show:
                         l.append(x_t)
 
-
                 utils.save_image(final_all[k], str(self.results_folder / f'final_{cnt}.png'), nrow=1)
                 final = cv2.imread(f'{self.results_folder}/final_{cnt}.png')
                 l.append(final)
 
-
                 im_h = cv2.hconcat(l)
                 cv2.imwrite(f'{self.results_folder}/all_{cnt}.png', im_h)
 
-                cnt+=1
-
-            del Forward
-            del Backward
-            del final_all
+                cnt += 1
 
     def paper_invert_section_images(self, s_times=None):
 

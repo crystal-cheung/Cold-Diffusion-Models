@@ -192,14 +192,14 @@ class Unet(nn.Module):
         self,
         dim,
         out_dim = None,
-        dim_mults=(1, 2, 4, 8),
+        dim_mults=(1, 2, 4, 8), #dimension multipliers
         channels = 3,
-        with_time_emb = True,
-        residual = False
+        with_time_emb = True, #whether to use time embedding
+        residual = False #residual connections or not
     ):
         super().__init__()
         self.channels = channels
-        self.residual = residual
+        self.residual = residual 
         print("Is Time embed used ? ", with_time_emb)
 
         dims = [channels, *map(lambda m: dim * m, dim_mults)]
@@ -246,7 +246,7 @@ class Unet(nn.Module):
                 Upsample(dim_in) if not is_last else nn.Identity()
             ]))
 
-        out_dim = default(out_dim, channels)
+        out_dim = default(out_dim, channels) #if out_dim is None, then out_dim = channels
         self.final_conv = nn.Sequential(
             ConvNextBlock(dim, dim),
             nn.Conv2d(dim, out_dim, 1)
@@ -367,7 +367,7 @@ class GaussianDiffusion(nn.Module):
                 xt_sub1_bar = self.q_sample(x_start=xt_sub1_bar, x_end=x2_bar, t=step2)
 
             x = img - xt_bar + xt_sub1_bar
-            img = x
+            img = x #
             t = t - 1
 
         self.denoise_fn.train()
@@ -487,7 +487,7 @@ class GaussianDiffusion(nn.Module):
         if t == None:
             t = self.num_timesteps
 
-        X1_0s, X2_0s, X_ts = [], [], []
+        X1_0s, X2_0s, X_ts = [], [], [] #initia
         while (t):
 
             step = torch.full((batch_size,), t - 1, dtype=torch.long).cuda()
@@ -519,7 +519,7 @@ class GaussianDiffusion(nn.Module):
         return (
                 extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
                 extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * x_end
-        )
+        ) 
 
     def p_losses(self, x_start, x_end, t):
         b, c, h, w = x_start.shape
@@ -533,7 +533,7 @@ class GaussianDiffusion(nn.Module):
             else:
                 raise NotImplementedError()
 
-        return loss
+        return loss 
 
     def forward(self, x1, x2, *args, **kwargs):
         b, c, h, w, device, img_size, = *x1.shape, x1.device, self.image_size
@@ -641,8 +641,8 @@ class Trainer(object):
         super().__init__()
         self.model = diffusion_model
         self.ema = EMA(ema_decay)
-        self.ema_model = copy.deepcopy(self.model)
         self.update_ema_every = update_ema_every
+        self.ema_model = copy.deepcopy(self.model)
 
         self.step_start_ema = step_start_ema
         self.save_and_sample_every = save_and_sample_every
@@ -732,12 +732,14 @@ class Trainer(object):
         backwards = partial(loss_backwards, self.fp16)
 
         acc_loss = 0
+        #train loop
         while self.step < self.train_num_steps:
-            u_loss = 0
+            u_loss = 0 # loss for each batch
             for i in range(self.gradient_accumulate_every):
                 data_1 = next(self.dl)
                 data_2 = torch.randn_like(data_1)
 
+                
                 data_1, data_2 = data_1.cuda(), data_2.cuda()
                 loss = torch.mean(self.model(data_1, data_2))
                 if self.step % 100 == 0:
@@ -747,8 +749,8 @@ class Trainer(object):
 
             acc_loss = acc_loss + (u_loss/self.gradient_accumulate_every)
 
-            self.opt.step()
-            self.opt.zero_grad()
+            self.opt.step() # update weights
+            self.opt.zero_grad() # reset gradients
 
             if self.step % self.update_ema_every == 0:
                 self.step_ema()
@@ -759,7 +761,7 @@ class Trainer(object):
 
                 data_1 = next(self.dl)
                 data_2 = torch.randn_like(data_1)
-                og_img = data_2.cuda()
+                og_img = data_2.cuda() # original image
 
                 xt, direct_recons, all_images = self.ema_model.module.sample(batch_size=batches, img=og_img)
 
@@ -769,10 +771,10 @@ class Trainer(object):
                 all_images = (all_images + 1) * 0.5
                 utils.save_image(all_images, str(self.results_folder / f'sample-recon-{milestone}.png'), nrow = 6)
 
-                direct_recons = (direct_recons + 1) * 0.5
+                direct_recons = (direct_recons + 1) * 0.5 # direct reconstructions
                 utils.save_image(direct_recons, str(self.results_folder / f'sample-direct_recons-{milestone}.png'), nrow=6)
 
-                xt = (xt + 1) * 0.5
+                xt = (xt + 1) * 0.5 #
                 utils.save_image(xt, str(self.results_folder / f'sample-xt-{milestone}.png'),
                                  nrow=6)
 
